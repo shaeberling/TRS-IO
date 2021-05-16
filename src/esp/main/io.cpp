@@ -18,6 +18,7 @@
 #include "driver/gpio.h"
 #include "freertos/event_groups.h"
 #include "freertos/timers.h"
+#include "trs_virtual_interface.h"
 
 
 // GPIO pins 12-19
@@ -168,7 +169,7 @@ static inline void trs_io_write() {
   if (port == 0x0f) {
     d = trigger_trs_io_action ? 0xff : TrsIO::inZ80();
   } else {
-    d = trigger_trs_io_action ? 0xff : trs_printer_read();
+    d = trigger_trs_io_action ? 0xff : TrsVirtualInterface::instance()->printerRead();
   }
   d <<= 12;
   REG_WRITE(GPIO_OUT_W1TS_REG, d);
@@ -208,7 +209,7 @@ static inline void floppy_write()
 
   uint32_t d = 0xff;
   uint16_t addr = read_a0_a15();
-  
+
   switch(addr) {
   case 0x37e0:
     d = fdc_37e0;
@@ -243,7 +244,7 @@ static void io_task(void* p)
   io_task_started = true;
   portDISABLE_INTERRUPTS();
   intr_enabled = false;
-  
+
   while(true) {
     // Wait for access the GAL to trigger this ESP
     while ((GPIO.in & MASK_ESP_SEL_N) && (intr_event == 0)) ;
@@ -306,13 +307,13 @@ static void io_task(void* p)
       }
 #endif
     }
-    
+
     // Release ESP_WAIT_RELEASE_N
     GPIO.out_w1ts = MASK_ESP_WAIT_RELEASE_N;
 
     // Wait for ESP_SEL_N to be de-asserted
     while (!(GPIO.in & MASK_ESP_SEL_N)) ;
-    
+
     // Set ESP_WAIT_RELEASE_N to 0 for next IO command
     GPIO.out_w1tc = MASK_ESP_WAIT_RELEASE_N;
 
@@ -339,7 +340,7 @@ static void action_task(void* p)
         REG_WRITE(GPIO_OUT_W1TS_REG, MASK_IOBUSINT_N);
 #endif
       } else {
-        trs_printer_write(printer_data);
+        TrsVirtualInterface::instance()->onPrinterWrite(printer_data);
         printer_data = -1;
         trigger_trs_io_action = false;
       }
@@ -368,9 +369,9 @@ static void action_task(void* p)
         set_led(true, false, false, false, false);
       }
       vTaskDelay(1000 / portTICK_PERIOD_MS);
-      set_led(false, false, false, false, false);      
+      set_led(false, false, false, false, false);
     }
-      
+
     vTaskDelay(1);
   }
 }
@@ -401,7 +402,7 @@ void init_io()
   // Configure ESP_READ_N
   gpioConfig.pin_bit_mask = MASK64_ESP_READ_N;
   gpio_config(&gpioConfig);
-  
+
   // Configure ESP_SEL_N
   gpioConfig.pin_bit_mask = MASK64_ESP_SEL_N;
   gpio_config(&gpioConfig);
@@ -421,10 +422,10 @@ void init_io()
   gpioConfig.mode = GPIO_MODE_OUTPUT;
   gpioConfig.intr_type = GPIO_INTR_DISABLE;
   gpio_config(&gpioConfig);
-  
+
   // Set IOBUSINT_N to 0
   gpio_set_level((gpio_num_t) IOBUSINT_N, 0);
-  
+
   // Set ESP_WAIT_RELEASE_N to 0
   gpio_set_level((gpio_num_t) ESP_WAIT_RELEASE_N, 0);
 

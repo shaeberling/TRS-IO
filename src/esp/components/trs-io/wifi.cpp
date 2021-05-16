@@ -1,6 +1,7 @@
+#include "wifi.h"
 
 #include "retrostore.h"
-#include "wifi.h"
+#include "trs_virtual_interface.h"
 #include "ntp_sync.h"
 #include "trs-fs.h"
 #include "smb.h"
@@ -29,12 +30,11 @@
 static const char* TAG = "TRS-IO wifi";
 
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
-extern const uint8_t printer_html_start[] asm("_binary_printer_html_start");
+extern const uint8_t printer_html_start[] asm("_binary_trs_virtual_interface_html_start");
 extern const uint8_t font_ttf_start[] asm("_binary_AnotherMansTreasureMIII64C_ttf_start");
 extern const uint8_t font_ttf_end[] asm("_binary_AnotherMansTreasureMIII64C_ttf_end");
 
 static uint8_t status = RS_STATUS_WIFI_CONNECTING;
-
 
 uint8_t* get_wifi_status()
 {
@@ -106,13 +106,13 @@ void set_wifi_credentials(const char* ssid, const char* passwd)
 // Web server
 
 static trs_io_wifi_config_t config EXT_RAM_ATTR = {};
-static struct mg_connection *ws_conn = NULL;
+static struct mg_connection *virt_interface_conn = NULL;
 
 
 static void copy_config_from_nvs(const char* key, char* value, size_t max_len)
 {
   size_t len;
-  
+
   *value = '\0';
   if (storage_has_key(key, &len)) {
     assert (len <= max_len + 1);
@@ -144,7 +144,7 @@ static bool extract_post_param(struct mg_http_message* message,
   // SMB URL is the longest parameter
   static char buf[MAX_LEN_SMB_URL + 1] EXT_RAM_ATTR;
   static char buf2[sizeof(buf)] EXT_RAM_ATTR;
-  
+
   mg_http_get_var(&message->body, param, buf, sizeof(buf));
   // In case someone tries to force a buffer overflow
   buf[max_len + 1] = '\0';
@@ -201,7 +201,7 @@ static void mongoose_handle_status(struct mg_http_message* message,
     free(resp);
     resp = NULL;
   }
-  
+
   cJSON* s = cJSON_CreateObject();
   cJSON_AddNumberToObject(s, "hardware_rev", TRS_IO_HARDWARE_REVISION);
   cJSON_AddNumberToObject(s, "vers_major", TRS_IO_VERSION_MAJOR);
@@ -251,7 +251,7 @@ static void mongoose_event_handler(struct mg_connection *c,
                                    int event, void *eventData, void *fn_data)
 {
   static bool reboot = false;
-  
+
   switch (event) {
   case MG_EV_HTTP_MSG:
     {
@@ -270,30 +270,42 @@ static void mongoose_event_handler(struct mg_connection *c,
         response_len = strlen(response);
       }
 
-      if (mg_http_match_uri(message, "/printer")) {
+      if (mg_http_match_uri(message, "/vi")) {
         response = (char*) printer_html_start;
         response_len = strlen(response);
+
       }
-      
+
       if (mg_http_match_uri(message, "/font.ttf")) {
         response = (char*) font_ttf_start;
         response_len = font_ttf_end - font_ttf_start;
         content_type = "font/ttf";
       }
 
-      if (mg_http_match_uri(message, "/log")) {
+      if (mg_http_match_uri(message, "/vi_data")) {
+        virt_interface_conn = c;
         mg_ws_upgrade(c, message, NULL);
-        ws_conn = c;
+        TrsVirtualInterface::instance()->setChannel([](const char* msg, size_t len) {
+          mg_ws_send(virt_interface_conn, msg, len, WEBSOCKET_OP_BINARY);
+        });
       } else {
-        mg_printf(c, "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", content_type, response_len);
+        mg_printf(c, "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nConnection: close\r\nContent-Length: %d\r\n\r\n", content_type, response_len);
         mg_send(c, response, response_len);
       }
     }
     break;
+  case MG_EV_WS_MSG: {
+    // Got Websocket frame.
+    struct mg_ws_message *wm = (struct mg_ws_message *) eventData;
+    std::string data(wm->data.ptr, wm->data.len);
+    TrsVirtualInterface::instance()->onViFrontendData(data);
+    break;
+  }
   case MG_EV_CLOSE:
     {
-      if (c == ws_conn) {
-        ws_conn = NULL;
+      if (c == virt_interface_conn) {
+        virt_interface_conn = NULL;
+        TrsVirtualInterface::instance()->setChannelClosed();
       }
       if (reboot) {
         vTaskDelay(2000 / portTICK_PERIOD_MS);
@@ -302,18 +314,6 @@ static void mongoose_event_handler(struct mg_connection *c,
     }
     break;
   }
-}
-
-void trs_printer_write(const char* ch)
-{
-  if (ws_conn != NULL) {
-    mg_ws_send(ws_conn, ch, strlen(ch), WEBSOCKET_OP_TEXT);
-  }
-}
-
-uint8_t trs_printer_read()
-{
-  return (ws_conn == NULL) ? 0xff : 0x30;
 }
 
 static void init_mdns()
@@ -338,11 +338,11 @@ static void mg_task(void* p)
 
   // Start Mongoose
   mg_mgr_init(&mgr);
-  mg_http_listen(&mgr, "http://0.0.0.0:80", mongoose_event_handler, &mgr); 
+  mg_http_listen(&mgr, "http://0.0.0.0:80", mongoose_event_handler, &mgr);
 
   while(true) {
     vTaskDelay(1);
-    mg_mgr_poll(&mgr, 1000);
+    mg_mgr_poll(&mgr, 100);
   }
 }
 
@@ -353,7 +353,7 @@ void wifi_init_ap()
   wifi_config_t wifi_config = {
     .ap = {0}
   };
-  
+
   esp_netif_create_default_wifi_ap();
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -363,7 +363,7 @@ void wifi_init_ap()
   strcpy((char*) wifi_config.ap.password, "");
   wifi_config.ap.max_connection = 1;
   wifi_config.ap.authmode = WIFI_AUTH_OPEN;
-  
+
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
   ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
 }
