@@ -1,4 +1,8 @@
-# TRS-IO
+# TRS-IO (Forked)
+
+**This is a fork from the original https://github.com/apuder/TRS-IO,
+used for new feature development.**
+
 
 TRS-IO gives a TRS-80 Model III online capabilities and provides
 access to a variety of services. TRS-IO currently features the
