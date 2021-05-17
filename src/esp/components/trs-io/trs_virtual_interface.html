@@ -93,7 +93,9 @@
             const screenSize = screenWidth * screenHeight;
             updateScreen(screenWidth, screenHeight, data.slice(3));
           } else if (data[0] == MSG_PRINTER_WRITE) {
-            printerWrite(m3toUnicode[data[1]]);
+            let character = m3toUnicode[data[1]]
+            if (data[1] == 0x0D) character = "\n";  // CR
+            printerWrite(character);
           } else if (data[0] == MSG_PRINTER_NEW_LINE) {
             printerWrite("\n");
           } else {
