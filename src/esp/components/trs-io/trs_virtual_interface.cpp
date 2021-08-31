@@ -6,9 +6,10 @@
 
 #include <functional>
 #include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include "fabgl.h"
 #include "trs-keyboard.h"
@@ -34,6 +35,7 @@ TrsVirtualInterface* TrsVirtualInterface::instance() {
 }
 
 TrsVirtualInterface::TrsVirtualInterface() : keyboard_(NULL),
+                                             dataChannelSem_(NULL),
                                              frontendConnected_(false),
                                              screenBuffer_(NULL) {
   setChannelClosed();
@@ -41,6 +43,7 @@ TrsVirtualInterface::TrsVirtualInterface() : keyboard_(NULL),
 
 void TrsVirtualInterface::init(fabgl::Keyboard* kb) {
   keyboard_ = kb;
+  dataChannelSem_ = xSemaphoreCreateMutex();
 
   // Create and start task that periodically sends updates to the frontend.
   std::string task_name = "vi_screen_updater";
@@ -113,7 +116,8 @@ void TrsVirtualInterface::onPrinterWrite(uint8_t data) {
   char* msg = static_cast<char*>(malloc(msgSize));
   msg[0] = static_cast<char>(MSG_PRINTER_WRITE);
   msg[1] = static_cast<char>(data);
-  dataChannel_(msg, msgSize);
+  onSendData(msg, msgSize);
+  vTaskDelay(5 / portTICK_PERIOD_MS);
   free(msg);
 }
 
@@ -121,7 +125,7 @@ void TrsVirtualInterface::onPrinterNewLine() {
   auto msgSize = 1;
   char* msg = static_cast<char*>(malloc(msgSize));
   msg[0] = static_cast<char>(MSG_PRINTER_NEW_LINE);
-  dataChannel_(msg, msgSize);
+  onSendData(msg, msgSize);
   free(msg);
 }
 
@@ -143,6 +147,16 @@ void TrsVirtualInterface::onViFrontendData(const std::string& msg) {
     }
   } else {
     ESP_LOGW(TAG, "Unknown incoming VI message: '%s'", msg.c_str());
+  }
+}
+
+// private
+void TrsVirtualInterface::onSendData(const char* msg, size_t msgSize) {
+  if (xSemaphoreTake(dataChannelSem_, (TickType_t) 10) == pdTRUE) {
+    dataChannel_(msg, msgSize);
+    xSemaphoreGive(dataChannelSem_);
+  } else {
+    ESP_LOGW(TAG, "Cannot obtain lock on sending channel.");
   }
 }
 
@@ -173,7 +187,7 @@ void TrsVirtualInterface::startUpdateLoop(void* param) {
       msg[1] = static_cast<char>(screenWidth);
       msg[2] = static_cast<char>(screenHeight);
       memcpy(&msg[3], vi->screenBuffer_, screenSize);
-      vi->dataChannel_(msg, msgSize);
+      vi->onSendData(msg, msgSize);
     }
     vTaskDelay(DATA_UPDATE_DELAY_MICROS / portTICK_PERIOD_MS);
     free(msg);

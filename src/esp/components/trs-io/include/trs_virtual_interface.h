@@ -11,9 +11,10 @@
 #include <string.h>
 #include <map>
 #include <tuple>
+#include "freertos/semphr.h"
 
 namespace {
-typedef std::function<void(const char*, size_t len)> DataChannel;
+typedef std::function<void(const char* msg, size_t msgSize)> DataChannel;
 typedef std::function<std::tuple<uint8_t, uint8_t>()> ScreenSizeProvider;
 }  // namespace
 
@@ -58,11 +59,13 @@ class TrsVirtualInterface {
   static TrsVirtualInterface* instance_;
   fabgl::Keyboard* keyboard_;
   DataChannel dataChannel_;
+  SemaphoreHandle_t  dataChannelSem_;
   bool frontendConnected_;
   uint8_t* screenBuffer_;
   ScreenSizeProvider screenSizeProvider_;
   std::map<std::string, VirtualKey> asciiToVK_;
   static void startUpdateLoop(void* param);
+  void onSendData(const char*, size_t len);
   void onViKeyPress(const std::string& key, bool down, bool shift);
 };
 
