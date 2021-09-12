@@ -1,24 +1,26 @@
-
-#include "retrostore.h"
 #include "wifi.h"
-#include "ntp_sync.h"
-#include "trs-fs.h"
-#include "smb.h"
-#include "ota.h"
-#include "led.h"
-#include "io.h"
-#include "storage.h"
-#include "event.h"
-#include "ntp_sync.h"
-#include "esp_wifi.h"
-#include "esp_mock.h"
-#include "version.h"
-#include "mdns.h"
+
+#include <string.h>
+
+#include "cJSON.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_mock.h"
+#include "esp_wifi.h"
+#include "event.h"
+#include "io.h"
+#include "led.h"
+
+#include "retrostore.h"
 #include "mongoose.h"
-#include <string.h>
-#include "cJSON.h"
+#include "mdns.h"
+#include "ntp_sync.h"
+#include "ota.h"
+#include "smb.h"
+#include "storage.h"
+#include "trs-fs.h"
+#include "version.h"
+#include "web_debugger.h"
 
 #define WIFI_KEY_SSID "ssid"
 #define WIFI_KEY_PASSWD "passwd"
@@ -33,8 +35,12 @@ extern const uint8_t printer_html_start[] asm("_binary_printer_html_start");
 extern const uint8_t font_ttf_start[] asm("_binary_AnotherMansTreasureMIII64C_ttf_start");
 extern const uint8_t font_ttf_end[] asm("_binary_AnotherMansTreasureMIII64C_ttf_end");
 
-static uint8_t status = RS_STATUS_WIFI_CONNECTING;
+extern const uint8_t web_debugger_html_start[] asm("_binary_web_debugger_html_start");
+extern const uint8_t web_debugger_css_start[] asm("_binary_web_debugger_css_start");
+extern const uint8_t web_debugger_js_start[] asm("_binary_web_debugger_js_start");
 
+static uint8_t status = RS_STATUS_WIFI_CONNECTING;
+static WebDebugger web_debugger_;
 
 uint8_t* get_wifi_status()
 {
@@ -61,6 +67,30 @@ const char* get_wifi_ip()
 {
   return ip;
 }
+
+//---------------------TRS xray---------------------------------------------
+
+static char* on_trx_get_resource(TRX_RESOURCE_TYPE type) {
+	switch(type) {
+		case TRX_RES_MAIN_HTML:
+		  return (char*)web_debugger_html_start;
+		case TRX_RES_MAIN_JS:
+		  return (char*)web_debugger_js_start;
+		case TRX_RES_MAIN_CSS:
+		  return (char*)web_debugger_css_start;
+		case TRX_RES_TRS_FONT:
+		  // FIXME
+		  return (char*)web_debugger_html_start;
+		case TRX_RES_JQUERY:
+		  // FIXME
+		  return (char*)web_debugger_html_start;
+		default:
+		  printf("ERROR: Unknown resource type.");
+		  return (char*)web_debugger_html_start;
+	}
+}
+
+//-------------------------------------------------------------------------
 
 static void event_handler(void* arg, esp_event_base_t event_base,
                           int32_t event_id, void* event_data)
@@ -112,7 +142,7 @@ static struct mg_connection *ws_conn = NULL;
 static void copy_config_from_nvs(const char* key, char* value, size_t max_len)
 {
   size_t len;
-  
+
   *value = '\0';
   if (storage_has_key(key, &len)) {
     assert (len <= max_len + 1);
@@ -144,7 +174,7 @@ static bool extract_post_param(struct mg_http_message* message,
   // SMB URL is the longest parameter
   static char buf[MAX_LEN_SMB_URL + 1] EXT_RAM_ATTR;
   static char buf2[sizeof(buf)] EXT_RAM_ATTR;
-  
+
   mg_http_get_var(&message->body, param, buf, sizeof(buf));
   // In case someone tries to force a buffer overflow
   buf[max_len + 1] = '\0';
@@ -201,7 +231,7 @@ static void mongoose_handle_status(struct mg_http_message* message,
     free(resp);
     resp = NULL;
   }
-  
+
   cJSON* s = cJSON_CreateObject();
   cJSON_AddNumberToObject(s, "hardware_rev", TRS_IO_HARDWARE_REVISION);
   cJSON_AddNumberToObject(s, "vers_major", TRS_IO_VERSION_MAJOR);
@@ -258,7 +288,12 @@ static void mongoose_event_handler(struct mg_connection *c,
                                    int event, void *eventData, void *fn_data)
 {
   static bool reboot = false;
-  
+
+  // Return if the web debugger is handling the request.
+  if (web_debugger_.handle_www(c, event, eventData, fn_data)) {
+    return;
+  }
+
   switch (event) {
   case MG_EV_HTTP_MSG:
     {
@@ -270,31 +305,23 @@ static void mongoose_event_handler(struct mg_connection *c,
       if (mg_http_match_uri(message, "/config")) {
         reboot = mongoose_handle_config(message, &response, &content_type);
         response_len = strlen(response);
-      }
-
-      if (mg_http_match_uri(message, "/status")) {
+      } else if (mg_http_match_uri(message, "/status")) {
         mongoose_handle_status(message, &response, &content_type);
         response_len = strlen(response);
-      }
-
-      if (mg_http_match_uri(message, "/printer")) {
+      } else if (mg_http_match_uri(message, "/printer")) {
         response = (char*) printer_html_start;
         response_len = strlen(response);
-      }
-      
-      if (mg_http_match_uri(message, "/font.ttf")) {
+      } else if (mg_http_match_uri(message, "/font.ttf")) {
         response = (char*) font_ttf_start;
         response_len = font_ttf_end - font_ttf_start;
         content_type = "font/ttf";
-      }
-
-      if (mg_http_match_uri(message, "/log")) {
+      } else if (mg_http_match_uri(message, "/log")) {
         mg_ws_upgrade(c, message, NULL);
         ws_conn = c;
-      } else {
-        mg_printf(c, "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", content_type, response_len);
-        mg_send(c, response, response_len);
       }
+
+      mg_printf(c, "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nConnection: close\r\nContent-Length: %d\r\n\r\n", content_type, response_len);
+      mg_send(c, response, response_len);
     }
     break;
   case MG_EV_CLOSE:
@@ -348,11 +375,13 @@ static void mg_task(void* p)
 
   // Start Mongoose
   mg_mgr_init(&mgr);
-  mg_http_listen(&mgr, "http://0.0.0.0:80", mongoose_event_handler, &mgr); 
+  mg_http_listen(&mgr, "0.0.0.0:80", mongoose_event_handler, &mgr);
 
   while(true) {
-    vTaskDelay(1);
+    vTaskDelay(40);
     mg_mgr_poll(&mgr, 1000);
+    ESP_LOGI(TAG, "Polling done.");
+    web_debugger_.handle_dynamic_update();
   }
 }
 
@@ -363,7 +392,7 @@ void wifi_init_ap()
   wifi_config_t wifi_config = {
     .ap = {0}
   };
-  
+
   esp_netif_create_default_wifi_ap();
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -373,7 +402,7 @@ void wifi_init_ap()
   strcpy((char*) wifi_config.ap.password, "");
   wifi_config.ap.max_connection = 1;
   wifi_config.ap.authmode = WIFI_AUTH_OPEN;
-  
+
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
   ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
 }
@@ -399,6 +428,13 @@ static void wifi_init_sta()
   ESP_ERROR_CHECK(esp_wifi_init(&cfg));
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
   ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+}
+
+// Caller gives up ownership of ctx.
+void init_debugger(TRX_Context* ctx) {
+  ctx->get_resource = &on_trx_get_resource;
+  web_debugger_.init_trs_xray(ctx);
+  ESP_LOGI(TAG, "TRX initialized.");
 }
 
 void init_wifi()

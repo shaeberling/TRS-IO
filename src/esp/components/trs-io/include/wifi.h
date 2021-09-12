@@ -2,6 +2,7 @@
 #pragma once
 
 #include "defs.h"
+#include "web_debugger.h"
 
 #define RS_STATUS_WIFI_NOT_NEEDED 0
 #define RS_STATUS_WIFI_CONNECTING 1
@@ -34,3 +35,4 @@ trs_io_wifi_config_t* get_wifi_config();
 void trs_printer_write(const char* ch);
 uint8_t trs_printer_read();
 void init_wifi();
+void init_debugger(TRX_Context* ctx);  // Caller gives up ownership of ctx.
