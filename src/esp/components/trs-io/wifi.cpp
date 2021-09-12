@@ -10,6 +10,8 @@
 #include "event.h"
 #include "io.h"
 #include "led.h"
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
 
 #include "retrostore.h"
 #include "mongoose.h"
@@ -380,7 +382,6 @@ static void mg_task(void* p)
   while(true) {
     vTaskDelay(40);
     mg_mgr_poll(&mgr, 1000);
-    ESP_LOGI(TAG, "Polling done.");
     web_debugger_.handle_dynamic_update();
   }
 }
@@ -439,6 +440,7 @@ void init_debugger(TRX_Context* ctx) {
 
 void init_wifi()
 {
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); //disable brownout detector
   ESP_ERROR_CHECK(esp_netif_init());
   ESP_ERROR_CHECK(esp_event_loop_create_default());
   ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
@@ -468,4 +470,5 @@ void init_wifi()
   ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
   xTaskCreatePinnedToCore(mg_task, "mg", 6000, NULL, 1, NULL, 0);
+  // WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 1); // re-enable brownout detector
 }

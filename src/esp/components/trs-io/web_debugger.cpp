@@ -156,7 +156,7 @@ void WebDebugger::send_memory_segment(const char* params) {
 
   const TRX_MemorySegment* seg = &memory_query_cache_;
 
-  printf("[TRX] Segment: start:%d, length: %d\n", seg->range.start, seg->range.length);
+  printf("[TRX] Segment: start: %d, length: %d\n", seg->range.start, seg->range.length);
 
   // // Add start metadata.
   uint8_t* data_to_send = (uint8_t*) malloc(sizeof(uint8_t) * (seg->range.length + 2));
